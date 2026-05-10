@@ -1,0 +1,16 @@
+# Build outputs
+dist/
+bin/
+obj/
+
+# Local/user state
+.vs/
+*.user
+*.suo
+
+# Agent/debug notes
+.learnings/
+
+# Logs and temporary files
+*.log
+*.tmp
