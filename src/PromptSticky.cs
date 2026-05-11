@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -32,8 +33,8 @@ using ShapePath = System.Windows.Shapes.Path;
 [assembly: AssemblyDescription("本地提示词桌面便签小工具")]
 [assembly: AssemblyCompany("")]
 [assembly: AssemblyCopyright("")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyFileVersion("1.0.1.0")]
 
 namespace PromptStickyTool
 {
@@ -189,6 +190,8 @@ namespace PromptStickyTool
         private const double MinExpandedHeight = 280;
         private const string AppName = "提示词便签";
         private const string RunValueName = "PromptStickyTool";
+        private const string EmbeddedDataStart = "\n__PROMPT_STICKY_DATA_V1_START__\n";
+        private const string EmbeddedDataEnd = "\n__PROMPT_STICKY_DATA_V1_END__\n";
         private const int GwlExStyle = -20;
         private const int WsExToolWindow = 0x00000080;
         private const int WsExAppWindow = 0x00040000;
@@ -405,6 +408,11 @@ namespace PromptStickyTool
 
             if (_state == null)
             {
+                _state = TryLoadEmbeddedState();
+            }
+
+            if (_state == null)
+            {
                 _state = CreateDefaultState(firstRun);
             }
 
@@ -453,6 +461,103 @@ namespace PromptStickyTool
             return state;
         }
 
+        private AppState TryLoadEmbeddedState()
+        {
+            try
+            {
+                string exePath = Assembly.GetEntryAssembly().Location;
+                if (!File.Exists(exePath))
+                {
+                    return null;
+                }
+
+                byte[] bytes = File.ReadAllBytes(exePath);
+                byte[] start = Encoding.UTF8.GetBytes(EmbeddedDataStart);
+                byte[] end = Encoding.UTF8.GetBytes(EmbeddedDataEnd);
+                int startIndex = LastIndexOf(bytes, start);
+                if (startIndex < 0)
+                {
+                    return null;
+                }
+
+                int dataStart = startIndex + start.Length;
+                int endIndex = IndexOf(bytes, end, dataStart);
+                if (endIndex <= dataStart)
+                {
+                    return null;
+                }
+
+                string base64 = Encoding.ASCII.GetString(bytes, dataStart, endIndex - dataStart).Trim();
+                byte[] xmlBytes = Convert.FromBase64String(base64);
+                XmlSerializer serializer = new XmlSerializer(typeof(AppState));
+                using (MemoryStream stream = new MemoryStream(xmlBytes))
+                {
+                    return (AppState)serializer.Deserialize(stream);
+                }
+            }
+            catch (Exception ex)
+            {
+                Diagnostics.LogException("TryLoadEmbeddedState", ex);
+                return null;
+            }
+        }
+
+        private static int IndexOf(byte[] source, byte[] pattern, int start)
+        {
+            if (source == null || pattern == null || pattern.Length == 0)
+            {
+                return -1;
+            }
+
+            for (int i = Math.Max(0, start); i <= source.Length - pattern.Length; i++)
+            {
+                bool matched = true;
+                for (int j = 0; j < pattern.Length; j++)
+                {
+                    if (source[i + j] != pattern[j])
+                    {
+                        matched = false;
+                        break;
+                    }
+                }
+
+                if (matched)
+                {
+                    return i;
+                }
+            }
+
+            return -1;
+        }
+
+        private static int LastIndexOf(byte[] source, byte[] pattern)
+        {
+            if (source == null || pattern == null || pattern.Length == 0)
+            {
+                return -1;
+            }
+
+            for (int i = source.Length - pattern.Length; i >= 0; i--)
+            {
+                bool matched = true;
+                for (int j = 0; j < pattern.Length; j++)
+                {
+                    if (source[i + j] != pattern[j])
+                    {
+                        matched = false;
+                        break;
+                    }
+                }
+
+                if (matched)
+                {
+                    return i;
+                }
+            }
+
+            return -1;
+        }
+
         private void BuildInterface()
         {
             _shell = new Border();
@@ -473,6 +578,7 @@ namespace PromptStickyTool
             border.BorderBrush = new SolidColorBrush(Color.FromRgb(203, 213, 225));
             border.BorderThickness = new Thickness(1);
             border.Effect = CreateShadow(0.18, 16, 2);
+            border.Opacity = 0.62;
             border.Cursor = Cursors.Hand;
             border.ToolTip = "移入展开；未锁定时可拖动";
             border.MouseLeftButtonDown += DragSurfaceMouseLeftButtonDown;
@@ -620,7 +726,7 @@ namespace PromptStickyTool
             Grid.SetColumn(buttons, 1);
             headerGrid.Children.Add(buttons);
 
-            _lockButton = MakeHeaderButton("\uE72E", "锁定位置和大小", LockButtonClick);
+            _lockButton = MakeHeaderButton("\uE785", "当前未锁定，可拖动和缩放", LockButtonClick);
             buttons.Children.Add(_lockButton);
             buttons.Children.Add(MakeHeaderButton("\uE710", "添加一行", AddButtonClick));
             buttons.Children.Add(MakeHeaderButton("\uE74D", "删除当前行", DeleteButtonClick));
@@ -1230,8 +1336,8 @@ namespace PromptStickyTool
         {
             if (_lockButton != null)
             {
-                SetButtonIcon(_lockButton, _isLocked ? "\uE785" : "\uE72E");
-                _lockButton.ToolTip = _isLocked ? "解除锁定" : "锁定位置和大小";
+                SetButtonIcon(_lockButton, _isLocked ? "\uE72E" : "\uE785");
+                _lockButton.ToolTip = _isLocked ? "当前已锁定，点击解锁" : "当前未锁定，可拖动和缩放";
             }
 
             if (_autoStartButton != null)
@@ -1348,12 +1454,20 @@ namespace PromptStickyTool
                     return;
                 }
 
-                if ((Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
+                if ((Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift)
                 {
                     int caret = textBox.CaretIndex;
-                    textBox.Text = textBox.Text.Insert(caret, Environment.NewLine);
-                    textBox.CaretIndex = caret + Environment.NewLine.Length;
+                    string newline = Environment.NewLine;
+                    textBox.Text = textBox.Text.Insert(caret, newline);
+                    textBox.CaretIndex = caret + newline.Length;
+                    BindingExpression shiftBinding = textBox.GetBindingExpression(TextBox.TextProperty);
+                    if (shiftBinding != null)
+                    {
+                        shiftBinding.UpdateSource();
+                    }
+
                     e.Handled = true;
+                    ScheduleSave();
                     return;
                 }
 
@@ -1368,6 +1482,23 @@ namespace PromptStickyTool
                 Keyboard.ClearFocus();
                 _isEditing = false;
                 ScheduleSave();
+                return;
+            }
+
+            if (e.Key == Key.Escape)
+            {
+                e.Handled = true;
+                try
+                {
+                    _grid.CancelEdit(DataGridEditingUnit.Cell);
+                    _grid.CancelEdit(DataGridEditingUnit.Row);
+                }
+                catch
+                {
+                }
+
+                Keyboard.ClearFocus();
+                _isEditing = false;
             }
         }
 
@@ -1722,6 +1853,7 @@ namespace PromptStickyTool
 
             CommitGridEdit();
             SaveNow();
+            ScheduleEmbedStateIntoExecutable();
         }
 
         private void CommitGridEdit()
@@ -1790,6 +1922,65 @@ namespace PromptStickyTool
             catch
             {
             }
+        }
+
+        private void ScheduleEmbedStateIntoExecutable()
+        {
+            try
+            {
+                if (!File.Exists(_statePath))
+                {
+                    return;
+                }
+
+                string exePath = Assembly.GetEntryAssembly().Location;
+                if (String.IsNullOrEmpty(exePath) || !File.Exists(exePath))
+                {
+                    return;
+                }
+
+                string script = BuildPortableEmbedScript(exePath, _statePath);
+                string encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+
+                ProcessStartInfo info = new ProcessStartInfo();
+                info.FileName = "powershell.exe";
+                info.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand " + encoded;
+                info.CreateNoWindow = true;
+                info.UseShellExecute = false;
+                Process.Start(info);
+            }
+            catch (Exception ex)
+            {
+                Diagnostics.LogException("ScheduleEmbedStateIntoExecutable", ex);
+            }
+        }
+
+        private string BuildPortableEmbedScript(string exePath, string statePath)
+        {
+            string exe = Convert.ToBase64String(Encoding.UTF8.GetBytes(exePath));
+            string state = Convert.ToBase64String(Encoding.UTF8.GetBytes(statePath));
+            string start = Convert.ToBase64String(Encoding.UTF8.GetBytes(EmbeddedDataStart));
+            string end = Convert.ToBase64String(Encoding.UTF8.GetBytes(EmbeddedDataEnd));
+
+            StringBuilder script = new StringBuilder();
+            script.AppendLine("$exe=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + exe + "'))");
+            script.AppendLine("$state=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + state + "'))");
+            script.AppendLine("$start=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + start + "'))");
+            script.AppendLine("$end=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + end + "'))");
+            script.AppendLine("Start-Sleep -Milliseconds 900");
+            script.AppendLine("if(!(Test-Path -LiteralPath $exe) -or !(Test-Path -LiteralPath $state)){ exit }");
+            script.AppendLine("function LastIndexOfBytes([byte[]]$source,[byte[]]$pattern){ if($null -eq $source -or $null -eq $pattern -or $pattern.Length -eq 0){ return -1 }; for($i=$source.Length-$pattern.Length; $i -ge 0; $i--){ $ok=$true; for($j=0; $j -lt $pattern.Length; $j++){ if($source[$i+$j] -ne $pattern[$j]){ $ok=$false; break } }; if($ok){ return $i } }; return -1 }");
+            script.AppendLine("[byte[]]$bytes=[IO.File]::ReadAllBytes($exe)");
+            script.AppendLine("[byte[]]$startBytes=[Text.Encoding]::UTF8.GetBytes($start)");
+            script.AppendLine("$idx=LastIndexOfBytes $bytes $startBytes");
+            script.AppendLine("if($idx -ge 0){ [byte[]]$base=New-Object byte[] $idx; [Array]::Copy($bytes,0,$base,0,$idx); $bytes=$base }");
+            script.AppendLine("$data=[Convert]::ToBase64String([IO.File]::ReadAllBytes($state))");
+            script.AppendLine("[byte[]]$payload=[Text.Encoding]::UTF8.GetBytes($start+$data+$end)");
+            script.AppendLine("[byte[]]$out=New-Object byte[] ($bytes.Length+$payload.Length)");
+            script.AppendLine("[Array]::Copy($bytes,0,$out,0,$bytes.Length)");
+            script.AppendLine("[Array]::Copy($payload,0,$out,$bytes.Length,$payload.Length)");
+            script.AppendLine("[IO.File]::WriteAllBytes($exe,$out)");
+            return script.ToString();
         }
 
         private bool IsInteractiveElement(DependencyObject source)
