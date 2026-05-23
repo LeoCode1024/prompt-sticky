@@ -32,8 +32,8 @@ using ShapePath = System.Windows.Shapes.Path;
 [assembly: AssemblyDescription("本地提示词桌面便签小工具")]
 [assembly: AssemblyCompany("")]
 [assembly: AssemblyCopyright("")]
-[assembly: AssemblyVersion("1.0.2.0")]
-[assembly: AssemblyFileVersion("1.0.2.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 namespace PromptStickyTool
 {
@@ -234,6 +234,7 @@ namespace PromptStickyTool
         private bool _isTopmost;
         private bool _isLoading;
         private bool _isEditing;
+        private bool _isContextMenuOpen;
 
         [DllImport("user32.dll")]
         private static extern int GetWindowLong(IntPtr hwnd, int index);
@@ -635,7 +636,7 @@ namespace PromptStickyTool
             buttons.Children.Add(_autoStartButton);
             _topmostButton = MakeHeaderButton("\uE718", "置于所有窗口上方", TopmostButtonClick);
             buttons.Children.Add(_topmostButton);
-            buttons.Children.Add(MakeHeaderButton("\uE74E", "导出 CSV", ExportCsvButtonClick));
+            buttons.Children.Add(MakeHeaderButton("\uE8B5", "导入/导出 CSV", ImportExportButtonClick));
             buttons.Children.Add(MakeHeaderButton("\uE711", "关闭工具", CloseButtonClick));
 
             Grid body = new Grid();
@@ -963,7 +964,7 @@ namespace PromptStickyTool
 
         private void BeginCollapseCountdown()
         {
-            if (!_isExpanded || _isEditing)
+            if (!_isExpanded || _isEditing || _isContextMenuOpen)
             {
                 return;
             }
@@ -975,7 +976,7 @@ namespace PromptStickyTool
         private void CollapseTimerTick(object sender, EventArgs e)
         {
             _collapseTimer.Stop();
-            if (!IsMouseOver && !_isEditing)
+            if (!IsMouseOver && !_isEditing && !_isContextMenuOpen)
             {
                 Collapse();
             }
@@ -1212,6 +1213,86 @@ namespace PromptStickyTool
             ShowToast(_isTopmost ? "已置顶" : "已取消置顶");
         }
 
+        private void ImportExportButtonClick(object sender, RoutedEventArgs e)
+        {
+            Button button = sender as Button;
+            if (button == null)
+            {
+                return;
+            }
+
+            _collapseTimer.Stop();
+
+            bool menuActionStarted = false;
+            ContextMenu menu = new ContextMenu();
+            menu.PlacementTarget = button;
+            menu.Placement = PlacementMode.Bottom;
+            _isContextMenuOpen = true;
+
+            MenuItem importItem = new MenuItem();
+            importItem.Header = "导入 CSV";
+            importItem.Click += delegate
+            {
+                menuActionStarted = true;
+                ImportCsvButtonClick(button, new RoutedEventArgs());
+            };
+            menu.Items.Add(importItem);
+
+            MenuItem exportItem = new MenuItem();
+            exportItem.Header = "导出 CSV";
+            exportItem.Click += delegate
+            {
+                menuActionStarted = true;
+                ExportCsvButtonClick(button, new RoutedEventArgs());
+            };
+            menu.Items.Add(exportItem);
+
+            menu.Closed += delegate
+            {
+                _isContextMenuOpen = false;
+                if (!menuActionStarted && !IsMouseOver)
+                {
+                    BeginCollapseCountdown();
+                }
+            };
+
+            button.ContextMenu = menu;
+            menu.IsOpen = true;
+            e.Handled = true;
+        }
+
+        private void ImportCsvButtonClick(object sender, RoutedEventArgs e)
+        {
+            CommitGridEdit();
+            SaveNow();
+            _collapseTimer.Stop();
+
+            try
+            {
+                OpenFileDialog dialog = new OpenFileDialog();
+                dialog.Title = "导入提示词";
+                dialog.Filter = "CSV 文件 (*.csv)|*.csv|所有文件 (*.*)|*.*";
+                dialog.CheckFileExists = true;
+                dialog.Multiselect = false;
+
+                bool? result = dialog.ShowDialog(this);
+                if (result == true)
+                {
+                    ImportCsv(dialog.FileName);
+                }
+            }
+            catch (Exception ex)
+            {
+                Diagnostics.LogException("ImportCsv", ex);
+                ShowToast("导入失败");
+            }
+
+            if (!IsMouseOver)
+            {
+                BeginCollapseCountdown();
+            }
+        }
+
         private void ExportCsvButtonClick(object sender, RoutedEventArgs e)
         {
             CommitGridEdit();
@@ -1245,6 +1326,243 @@ namespace PromptStickyTool
             {
                 BeginCollapseCountdown();
             }
+        }
+
+        private void ImportCsv(string path)
+        {
+            List<PromptItem> importedItems = LoadCsvItems(path);
+            if (importedItems.Count == 0)
+            {
+                ShowToast("没有可导入内容");
+                return;
+            }
+
+            MessageBoxResult mode = MessageBox.Show(
+                this,
+                "是否将导入内容追加到现有表格？\n\n是：追加\n否：替换当前表格\n取消：不导入",
+                "导入 CSV",
+                MessageBoxButton.YesNoCancel,
+                MessageBoxImage.Question);
+
+            if (mode == MessageBoxResult.Cancel)
+            {
+                return;
+            }
+
+            if (mode == MessageBoxResult.No)
+            {
+                ClearItemsWithEvents();
+                _lastTouchedItem = null;
+            }
+
+            PromptItem firstImportedItem = null;
+            foreach (PromptItem item in importedItems)
+            {
+                AddItemWithEvents(item);
+                if (firstImportedItem == null)
+                {
+                    firstImportedItem = item;
+                }
+            }
+
+            _lastTouchedItem = firstImportedItem;
+            SelectPromptItem(firstImportedItem);
+            SaveNow();
+            ShowToast("√");
+        }
+
+        private List<PromptItem> LoadCsvItems(string path)
+        {
+            List<string[]> rows = ParseCsv(ReadCsvText(path));
+            List<PromptItem> items = new List<PromptItem>();
+            int startIndex = rows.Count > 0 && LooksLikeCsvHeader(rows[0]) ? 1 : 0;
+
+            for (int i = startIndex; i < rows.Count; i++)
+            {
+                string[] row = rows[i];
+                if (row == null || row.Length == 0)
+                {
+                    continue;
+                }
+
+                string category = "";
+                string prompt = "";
+                if (row.Length == 1)
+                {
+                    prompt = row[0] ?? "";
+                }
+                else
+                {
+                    category = row[0] ?? "";
+                    prompt = row[1] ?? "";
+                }
+
+                if (string.IsNullOrWhiteSpace(category) && string.IsNullOrWhiteSpace(prompt))
+                {
+                    continue;
+                }
+
+                items.Add(new PromptItem
+                {
+                    Category = category,
+                    Prompt = prompt
+                });
+            }
+
+            return items;
+        }
+
+        private string ReadCsvText(string path)
+        {
+            byte[] bytes = File.ReadAllBytes(path);
+            if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+            {
+                return StripTextBom(Encoding.UTF8.GetString(bytes));
+            }
+
+            if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
+            {
+                return StripTextBom(Encoding.Unicode.GetString(bytes));
+            }
+
+            if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
+            {
+                return StripTextBom(Encoding.BigEndianUnicode.GetString(bytes));
+            }
+
+            try
+            {
+                return StripTextBom(new UTF8Encoding(false, true).GetString(bytes));
+            }
+            catch (DecoderFallbackException)
+            {
+                return StripTextBom(Encoding.Default.GetString(bytes));
+            }
+        }
+
+        private string StripTextBom(string text)
+        {
+            if (!string.IsNullOrEmpty(text) && text[0] == '\ufeff')
+            {
+                return text.Substring(1);
+            }
+
+            return text ?? "";
+        }
+
+        private List<string[]> ParseCsv(string text)
+        {
+            List<string[]> rows = new List<string[]>();
+            if (string.IsNullOrEmpty(text))
+            {
+                return rows;
+            }
+
+            List<string> fields = new List<string>();
+            StringBuilder field = new StringBuilder();
+            bool inQuotes = false;
+            bool sawFieldContent = false;
+            bool rowHasContent = false;
+
+            for (int i = 0; i < text.Length; i++)
+            {
+                char ch = text[i];
+
+                if (inQuotes)
+                {
+                    if (ch == '"')
+                    {
+                        if (i + 1 < text.Length && text[i + 1] == '"')
+                        {
+                            field.Append('"');
+                            sawFieldContent = true;
+                            rowHasContent = true;
+                            i++;
+                        }
+                        else
+                        {
+                            inQuotes = false;
+                        }
+                    }
+                    else
+                    {
+                        field.Append(ch);
+                        sawFieldContent = true;
+                        rowHasContent = true;
+                    }
+
+                    continue;
+                }
+
+                if (ch == '"')
+                {
+                    inQuotes = true;
+                    sawFieldContent = true;
+                    rowHasContent = true;
+                    continue;
+                }
+
+                if (ch == ',')
+                {
+                    fields.Add(field.ToString());
+                    field.Length = 0;
+                    sawFieldContent = false;
+                    rowHasContent = true;
+                    continue;
+                }
+
+                if (ch == '\r' || ch == '\n')
+                {
+                    fields.Add(field.ToString());
+                    if (rowHasContent || fields.Count > 1 || sawFieldContent)
+                    {
+                        rows.Add(fields.ToArray());
+                    }
+
+                    fields.Clear();
+                    field.Length = 0;
+                    sawFieldContent = false;
+                    rowHasContent = false;
+
+                    if (ch == '\r' && i + 1 < text.Length && text[i + 1] == '\n')
+                    {
+                        i++;
+                    }
+
+                    continue;
+                }
+
+                field.Append(ch);
+                sawFieldContent = true;
+                rowHasContent = true;
+            }
+
+            if (rowHasContent || fields.Count > 0 || sawFieldContent)
+            {
+                fields.Add(field.ToString());
+                rows.Add(fields.ToArray());
+            }
+
+            return rows;
+        }
+
+        private bool LooksLikeCsvHeader(string[] row)
+        {
+            if (row == null || row.Length < 2)
+            {
+                return false;
+            }
+
+            string first = NormalizeCsvHeader(row[0]);
+            string second = NormalizeCsvHeader(row[1]);
+            bool firstMatches = first == "类型" || first == "类别" || first == "type" || first == "category";
+            bool secondMatches = second == "提示词" || second == "内容" || second == "prompt" || second == "text";
+            return firstMatches && secondMatches;
+        }
+
+        private string NormalizeCsvHeader(string value)
+        {
+            return (value ?? "").Trim().Trim('\ufeff').ToLowerInvariant();
         }
 
         private void ExportCsv(string path)
@@ -1774,6 +2092,30 @@ namespace PromptStickyTool
             return null;
         }
 
+        private void SelectPromptItem(PromptItem item)
+        {
+            if (item == null || _grid == null)
+            {
+                return;
+            }
+
+            Dispatcher.BeginInvoke(new Action(delegate
+            {
+                try
+                {
+                    if (_items.Contains(item))
+                    {
+                        _grid.SelectedItem = item;
+                        _grid.CurrentCell = new DataGridCellInfo(item, _promptColumn);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Diagnostics.LogException("SelectPromptItem", ex);
+                }
+            }), DispatcherPriority.ApplicationIdle);
+        }
+
         private void AddItemWithEvents(PromptItem item)
         {
             if (item == null)
@@ -1783,6 +2125,16 @@ namespace PromptStickyTool
 
             item.PropertyChanged += ItemPropertyChanged;
             _items.Add(item);
+        }
+
+        private void ClearItemsWithEvents()
+        {
+            foreach (PromptItem item in _items.ToList())
+            {
+                item.PropertyChanged -= ItemPropertyChanged;
+            }
+
+            _items.Clear();
         }
 
         private void ItemsCollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
