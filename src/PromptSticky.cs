@@ -32,8 +32,8 @@ using ShapePath = System.Windows.Shapes.Path;
 [assembly: AssemblyDescription("本地提示词桌面便签小工具")]
 [assembly: AssemblyCompany("")]
 [assembly: AssemblyCopyright("")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.1.1.0")]
+[assembly: AssemblyFileVersion("1.1.1.0")]
 
 namespace PromptStickyTool
 {
@@ -132,6 +132,8 @@ namespace PromptStickyTool
             {
                 Diagnostics.LogException("UnhandledException", e.ExceptionObject as Exception);
             };
+
+            StartupTaskCompatibility.RepairBatterySettings(Assembly.GetEntryAssembly().Location);
 
             Application app = new Application();
             app.ShutdownMode = ShutdownMode.OnMainWindowClose;

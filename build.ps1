@@ -2,6 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Src = Join-Path $Root "src\PromptSticky.cs"
+$StartupCompatibility = Join-Path $Root "src\StartupTaskCompatibility.cs"
 $IconResource = Join-Path $Root "assets\sticky-icon.png"
 $Dist = Join-Path $Root "dist"
 $Out = Join-Path $Dist "PromptSticky.exe"
@@ -24,12 +25,14 @@ New-Item -ItemType Directory -Force -Path $Dist | Out-Null
   /reference:"$Framework\System.dll" `
   /reference:"$Framework\System.Core.dll" `
   /reference:"$Framework\System.Xml.dll" `
+  /reference:"$Framework\Microsoft.CSharp.dll" `
   /reference:"$PresentationFramework" `
   /reference:"$PresentationCore" `
   /reference:"$WindowsBase" `
   /reference:"$SystemXaml" `
   /resource:"$IconResource",PromptStickyTool.Assets.StickyIcon.png `
-  $Src
+  $Src `
+  $StartupCompatibility
 
 if ($LASTEXITCODE -ne 0) {
   exit $LASTEXITCODE
